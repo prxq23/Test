@@ -1,0 +1,641 @@
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local VirtualUser = game:GetService("VirtualUser")
+local LocalPlayer = Players.LocalPlayer
+
+if getgenv().StealToGrowHub_Loaded and getgenv().StealToGrowHub_Cleanup then
+    pcall(getgenv().StealToGrowHub_Cleanup)
+end
+
+pcall(function()
+    for _, g in ipairs(game:GetService("CoreGui"):GetChildren()) do
+        if g.Name == "[UPD] Steal to Grow a Garden" or g.Name == "StealToGrowHub" or g.Name == "redz Library V5" then
+            g:Destroy()
+        end
+    end
+    for _, g in ipairs(LocalPlayer.PlayerGui:GetChildren()) do
+        if g.Name == "[UPD] Steal to Grow a Garden" or g.Name == "StealToGrowHub" or g.Name == "redz Library V5" or g.Name == "SpiderCollector" then
+            g:Destroy()
+        end
+    end
+end)
+
+local Remotes = ReplicatedStorage:WaitForChild("Remotes", 10)
+if not Remotes then return end
+
+local SpeedConfig = require(ReplicatedStorage.Shared.Config.SpeedConfig)
+local BaseConfig = require(ReplicatedStorage.Shared.Config.BaseConfig)
+local GardenSizeConfig = require(ReplicatedStorage.Shared.Config.GardenSizeConfig)
+
+local Toggles = {
+    AutoSteal = false,
+    AutoTrain = false,
+    AutoClickPops = true,
+    AutoBuyEgg = false
+}
+
+local Settings = {
+    ReturnSpeed = 350
+}
+
+local EggsData = {
+    ["Stone Egg ($100K)"] = "StoneEgg",
+    ["Jungle Egg ($800K)"] = "JungleEgg",
+    ["Ocean Egg ($5M)"] = "OceanEgg",
+    ["Bee Egg ($80M)"] = "BeeEgg",
+    ["Space Egg ($1.8B)"] = "SpaceEgg",
+    ["Frozen Egg ($18B)"] = "FrozenEgg",
+    ["Hacker Egg ($100B)"] = "HackerEgg"
+}
+
+local EggOptions = {
+    "Stone Egg ($100K)",
+    "Jungle Egg ($800K)",
+    "Ocean Egg ($5M)",
+    "Bee Egg ($80M)",
+    "Space Egg ($1.8B)",
+    "Frozen Egg ($18B)",
+    "Hacker Egg ($100B)"
+}
+
+local SelectedEggs = {
+    ["Stone Egg ($100K)"] = true
+}
+
+local RarityWeights = {
+    Spider = 11,
+    Candy = 10,
+    Secret = 9,
+    Celestial = 8,
+    Divine = 7,
+    Mythic = 6,
+    Mythical = 6,
+    Legendary = 5,
+    Epic = 4,
+    Rare = 3,
+    Uncommon = 2,
+    Common = 1
+}
+
+local antiAfkConn = LocalPlayer.Idled:Connect(function()
+    VirtualUser:CaptureController()
+    VirtualUser:ClickButton2(Vector2.new())
+end)
+
+local function getMyBase()
+    if workspace:FindFirstChild("Map") and workspace.Map:FindFirstChild("Bases") then
+        for _, b in ipairs(workspace.Map.Bases:GetChildren()) do
+            if b:GetAttribute("OwnerUserId") == LocalPlayer.UserId or b:GetAttribute("OwnerName") == LocalPlayer.Name then
+                return b
+            end
+        end
+    end
+    return nil
+end
+
+local function isHoldingSeed()
+    if LocalPlayer:GetAttribute("HallCarrier") == true then
+        return true
+    end
+    local char = LocalPlayer.Character
+    if char then
+        for _, child in ipairs(char:GetChildren()) do
+            if child.Name:sub(1, 12) == "CarriedSeed_" then
+                return true
+            end
+        end
+    end
+    local activeFolder = workspace:FindFirstChild("Runtime") and workspace.Runtime:FindFirstChild("ActiveSeeds")
+    if activeFolder then
+        for _, s in ipairs(activeFolder:GetChildren()) do
+            if s:GetAttribute("CarrierUserId") == LocalPlayer.UserId and s:GetAttribute("State") == "Carried" then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+local function getSeedValue(rarity, species)
+    local rWeight = RarityWeights[rarity or ""] or 1
+    local income = 0
+    if species and SeedConfig and SeedConfig.GetIncome then
+        pcall(function()
+            income = SeedConfig.GetIncome(species) or 0
+        end)
+    end
+    return (rWeight * 1000000000) + income
+end
+
+local function plantStoredSeeds()
+    local myBase = getMyBase()
+    if not myBase then return false end
+
+    local activeTreesFolder = workspace:FindFirstChild("Runtime") and workspace.Runtime:FindFirstChild("ActiveTrees")
+    local myTrees = activeTreesFolder and activeTreesFolder:FindFirstChild(myBase.Name)
+    local currentTreeCount = myTrees and #myTrees:GetChildren() or 0
+    if currentTreeCount >= 10 then return false end
+
+    local inv = Remotes.InventoryRemotes.GetInventory:InvokeServer()
+    local storedSeeds = inv and inv.StoredSeeds or {}
+    if #storedSeeds == 0 then return false end
+
+    table.sort(storedSeeds, function(a, b)
+        local va = tonumber(a.BaseIncomePerSecond) or getSeedValue(a.Rarity, a.Species or a.Id)
+        local vb = tonumber(b.BaseIncomePerSecond) or getSeedValue(b.Rarity, b.Species or b.Id)
+        return va > vb
+    end)
+
+    local pivot = myBase:GetPivot()
+    local sizeLevel = myBase:GetAttribute("GardenSizeLevel")
+    local depthBonus = GardenSizeConfig.GetDepthBonus(sizeLevel)
+    local radius = BaseConfig.GetTreeRadius("Normal")
+    local center, size = BaseConfig.GetPlantableBounds(depthBonus)
+
+    local validSpots = {}
+    for ox = -size.X/2 + 4, size.X/2 - 4, 7 do
+        for oz = -size.Y/2 + 4, size.Y/2 - 4, 7 do
+            if BaseConfig.IsInsidePlantable(ox, oz, radius, depthBonus, false) and not BaseConfig.GetBlockingZone(ox, oz, radius) then
+                local worldPt = pivot:PointToWorldSpace(Vector3.new(ox, 0.35, oz))
+                local occupied = false
+                if myTrees then
+                    for _, tr in ipairs(myTrees:GetChildren()) do
+                        if (tr:GetPivot().Position - worldPt).Magnitude < 5 then
+                            occupied = true
+                            break
+                        end
+                    end
+                end
+                if not occupied then
+                    table.insert(validSpots, worldPt)
+                end
+            end
+        end
+    end
+
+    if #validSpots == 0 then return false end
+
+    local char = LocalPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if hrp then
+        hrp.CFrame = CFrame.new(pivot.Position + Vector3.new(0, 3, 0))
+        task.wait(0.3)
+    end
+
+    local availableSlots = 10 - currentTreeCount
+    local planted = 0
+    for i, seed in ipairs(storedSeeds) do
+        if planted >= availableSlots or i > #validSpots then break end
+        local spot = validSpots[i]
+        if not spot then break end
+
+        Remotes.InventoryRemotes.MoveToHotbar:FireServer("Seed", seed.Uid, 3)
+        task.wait(0.2)
+        Remotes.BaseRemotes.RequestPlantSeed:FireServer(seed.Uid, spot)
+        task.wait(0.25)
+        planted = planted + 1
+    end
+
+    return planted > 0
+end
+
+local function applyGuardImmunity()
+    pcall(function()
+        local GuardComponent = require(ReplicatedStorage:WaitForChild("Library"):WaitForChild("Modules"):WaitForChild("GuardAreas"):WaitForChild("GuardComponent"))
+        if GuardComponent then
+            GuardComponent._attemptAttack = function() end
+        end
+    end)
+
+    pcall(function()
+        local Network = require(ReplicatedStorage:WaitForChild("Library"):WaitForChild("Client"):WaitForChild("Network"))
+        if not getgenv().GuardHitBlocked then
+            getgenv().GuardHitBlocked = true
+            local oldFire = Network.Fire
+            Network.Fire = function(endpoint, args)
+                if typeof(endpoint) == "string" and (endpoint:find("Hit") or endpoint:find("Deposit") or endpoint:find("Guard")) then
+                    return
+                end
+                return oldFire(endpoint, args)
+            end
+        end
+    end)
+
+    pcall(function()
+        local Knockback = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Modules"):WaitForChild("Knockback"))
+        Knockback.Apply = function() end
+    end)
+
+    pcall(function()
+        if not getgenv().GuardHookNamecallInstalled and hookmetamethod then
+            getgenv().GuardHookNamecallInstalled = true
+            local oldNamecall
+            oldNamecall = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+                local method = getnamecallmethod()
+                if (method == "FireServer" or method == "fireServer") and typeof(self) == "Instance" then
+                    local name = self.Name
+                    if (self.Parent and self.Parent.Name == "SagGuardBridge") or name:find("GuardHit") or name:find("ForestHit") or name:find("ForestDeposit") or name:find("GuardDeposit") then
+                        return
+                    end
+                end
+                return oldNamecall(self, ...)
+            end))
+        end
+    end)
+
+    pcall(function()
+        local char = LocalPlayer.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if hum then
+            hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
+            hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
+        end
+    end)
+end
+
+applyGuardImmunity()
+local charAddedConn = LocalPlayer.CharacterAdded:Connect(function()
+    task.wait(0.5)
+    applyGuardImmunity()
+end)
+
+local isStealing = false
+
+local function performStealOnce()
+    if isStealing then return false end
+    local char = LocalPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not hrp or not hum then return false end
+
+    if Remotes:FindFirstChild("InventoryRemotes") and Remotes.InventoryRemotes:FindFirstChild("StoreAllOfKind") then
+        Remotes.InventoryRemotes.StoreAllOfKind:FireServer("All")
+        task.wait(0.2)
+    end
+
+    local bestPrompt = nil
+    local bestWeight = -1
+    local bestPart = nil
+    local bestModel = nil
+    local bestDistanceZ = 999999
+
+    local activeFolder = workspace:FindFirstChild("Runtime") and workspace.Runtime:FindFirstChild("ActiveSeeds")
+    local searchScope = activeFolder and activeFolder:GetDescendants() or workspace:GetDescendants()
+
+    for _, p in ipairs(searchScope) do
+        if p:IsA("ProximityPrompt") and p.Enabled then
+            local part = p.Parent
+            if part and part:IsA("BasePart") then
+                local model = part:FindFirstAncestorWhichIsA("Model")
+                local rarity = model and model:GetAttribute("Rarity") or "Common"
+                local species = model and model:GetAttribute("Species")
+                local state = model and model:GetAttribute("State") or "Available"
+                local carrier = model and model:GetAttribute("CarrierUserId") or 0
+
+                if state == "Available" and carrier == 0 then
+                    local weight = getSeedValue(rarity, species)
+                    local distZ = math.abs(part.Position.Z)
+                    if weight > bestWeight or (weight == bestWeight and distZ < bestDistanceZ) then
+                        bestWeight = weight
+                        bestDistanceZ = distZ
+                        bestPrompt = p
+                        bestPart = part
+                        bestModel = model
+                    end
+                end
+            end
+        end
+    end
+
+    if bestPrompt and bestPart and hrp and hum then
+        isStealing = true
+
+        hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
+        hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
+
+        hrp.CFrame = CFrame.new(bestPart.Position + Vector3.new(0, 1.5, 0))
+        task.wait(0.3)
+
+        bestPrompt.HoldDuration = 0
+        bestPrompt.RequiresLineOfSight = false
+        bestPrompt.MaxActivationDistance = 999999
+
+        local acquired = false
+        for attempt = 1, 4 do
+            if isHoldingSeed() then
+                acquired = true
+                break
+            end
+
+            if fireproximityprompt then
+                fireproximityprompt(bestPrompt, 0, true)
+            else
+                bestPrompt:InputHoldBegin()
+                task.wait(0.02)
+                bestPrompt:InputHoldEnd()
+            end
+            task.wait(0.25)
+
+            if isHoldingSeed() then
+                acquired = true
+                break
+            end
+        end
+
+        if not acquired then
+            isStealing = false
+            return false
+        end
+
+        local tPickup = os.clock()
+        local startZ = hrp.Position.Z
+
+        local escapeY = math.max(bestPart.Position.Y + 2, 2.5)
+        hrp.CFrame = CFrame.new(0, escapeY, hrp.Position.Z)
+        task.wait(0.08)
+
+        local speedPower = LocalPlayer:GetAttribute("SpeedPower") or 1000
+        local maxLegitSpeed = SpeedConfig.GetMaxLegitimateSpeedForTrained(speedPower) or 50
+        local sprintSpeed = math.clamp(Settings.ReturnSpeed or 350, 100, 700)
+
+        local t0 = os.clock()
+        while os.clock() - t0 < 25 do
+            if not char or not hrp or not hum then break end
+            if hrp.Position.Z <= 120 then break end
+
+            hum.WalkSpeed = sprintSpeed
+            hum:MoveTo(Vector3.new(0, hrp.Position.Y, hrp.Position.Z - 150))
+            task.wait(0.04)
+        end
+
+        local t1 = os.clock()
+        while os.clock() - t1 < 6 do
+            if not char or not hrp or not hum then break end
+            if hrp.Position.Z <= 10 then break end
+
+            hum.WalkSpeed = 45
+            hum:MoveTo(Vector3.new(0, 0, 10))
+            task.wait(0.03)
+        end
+
+        hum:MoveTo(hrp.Position)
+        hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+        hum.WalkSpeed = 16
+
+        task.wait(0.8)
+
+        local noclipConn = RunService.Stepped:Connect(function()
+            if char then
+                for _, part in ipairs(char:GetDescendants()) do
+                    if part:IsA("BasePart") then
+                        part.CanCollide = false
+                    end
+                end
+            end
+        end)
+
+        local crossTime = os.clock()
+        hum.WalkSpeed = 24
+        while os.clock() - crossTime < 8 do
+            if not char or not hrp or not hum then break end
+            if LocalPlayer:GetAttribute("HallCarrier") ~= true and hrp.Position.Z <= -10 then
+                break
+            end
+            if hrp.Position.Z <= -28 then
+                break
+            end
+            hum:Move(Vector3.new(0, 0, -1), false)
+            hum:MoveTo(Vector3.new(hrp.Position.X, hrp.Position.Y, -32))
+            task.wait(0.03)
+        end
+
+        if noclipConn then
+            noclipConn:Disconnect()
+        end
+
+        hum:MoveTo(hrp.Position)
+        task.wait(0.5)
+
+        if Remotes:FindFirstChild("InventoryRemotes") and Remotes.InventoryRemotes:FindFirstChild("StoreAllOfKind") then
+            Remotes.InventoryRemotes.StoreAllOfKind:FireServer("All")
+            task.wait(0.3)
+        end
+
+        pcall(plantStoredSeeds)
+
+        isStealing = false
+        return true
+    end
+    return false
+end
+
+task.spawn(function()
+    while true do
+        if Toggles.AutoSteal and not isStealing then
+            pcall(performStealOnce)
+        end
+        task.wait(0.8)
+    end
+end)
+
+task.spawn(function()
+    while true do
+        if Toggles.AutoClickPops then
+            pcall(function()
+                local speedPopsUI = LocalPlayer.PlayerGui:FindFirstChild("SpeedPopsUI")
+                if speedPopsUI then
+                    for _, pop in ipairs(speedPopsUI:GetChildren()) do
+                        if pop:IsA("Frame") and pop.Name == "SpeedPop" then
+                            local btn = pop:FindFirstChild("Bubble") or pop:FindFirstChildWhichIsA("ImageButton", true)
+                            if btn and firesignal then
+                                firesignal(btn.Activated)
+                            end
+                        end
+                    end
+                end
+            end)
+        end
+        task.wait(0.08)
+    end
+end)
+
+pcall(function()
+    if Remotes:FindFirstChild("SpeedPopRemotes") and Remotes.SpeedPopRemotes:FindFirstChild("PopSpawn") then
+        Remotes.SpeedPopRemotes.PopSpawn.OnClientEvent:Connect(function(data)
+            if Toggles.AutoClickPops and data and data.Id then
+                task.wait(0.03)
+                Remotes.SpeedPopRemotes.ClaimPop:FireServer(data.Id)
+            end
+        end)
+    end
+end)
+
+task.spawn(function()
+    while true do
+        if Toggles.AutoTrain and not isStealing then
+            pcall(function()
+                local myBase = getMyBase()
+                if myBase and myBase:FindFirstChild("GroveTrainer") then
+                    local tz = myBase.GroveTrainer:FindFirstChild("TrainingZone")
+                    local char = LocalPlayer.Character
+                    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+                    if tz and hrp then
+                        if (hrp.Position - tz.Position).Magnitude > 6 then
+                            hrp.CFrame = tz.CFrame + Vector3.new(0, 2.5, 0)
+                        end
+                    end
+                end
+            end)
+        end
+        task.wait(0.8)
+    end
+end)
+
+task.spawn(function()
+    local buyCount = 0
+    while true do
+        if Toggles.AutoBuyEgg then
+            pcall(function()
+                if Remotes:FindFirstChild("EggRemotes") and Remotes.EggRemotes:FindFirstChild("BuyEgg") then
+                    local anyBought = false
+                    for _, opt in ipairs(EggOptions) do
+                        if not Toggles.AutoBuyEgg then break end
+                        if SelectedEggs[opt] == true and EggsData[opt] then
+                            Remotes.EggRemotes.BuyEgg:FireServer(EggsData[opt])
+                            buyCount = buyCount + 1
+                            anyBought = true
+                            task.wait(0.08)
+                        end
+                    end
+                    if not anyBought then
+                        task.wait(0.5)
+                    end
+                    if buyCount >= 14 and Remotes:FindFirstChild("InventoryRemotes") and Remotes.InventoryRemotes:FindFirstChild("StoreAllOfKind") then
+                        Remotes.InventoryRemotes.StoreAllOfKind:FireServer("All")
+                        buyCount = 0
+                    end
+                end
+            end)
+        else
+            task.wait(0.5)
+        end
+    end
+end)
+
+local redzLibSuccess, RedzLib = pcall(function()
+    return loadstring(game:HttpGet("https://raw.githubusercontent.com/minhdepzai-v/LibraryRobloc/refs/heads/main/RedzLibrary.lua"))()
+end)
+
+if not redzLibSuccess or not RedzLib then return end
+
+local Window = RedzLib:MakeWindow({
+    Title = "[UPD] Steal to Grow a Garden",
+    SubTitle = "By Dexq",
+    SaveFolder = "StealToGrowHub"
+})
+
+Window:AddMinimizeButton({
+    Button = { Image = "rbxassetid://10747373176", BackgroundColor3 = Color3.fromRGB(24, 25, 32) },
+    Corner = { CornerRadius = UDim.new(0, 10) }
+})
+
+local TabMain = Window:MakeTab({"เมนูหลัก", "cherry"})
+
+TabMain:AddSection("ฟาร์มและขโมยเมล็ด")
+
+TabMain:AddToggle({
+    Name = "เก็บเมล็ดจากดีสุดไปต่ำสุด",
+    Default = false,
+    Callback = function(v)
+        Toggles.AutoSteal = v
+    end
+})
+
+TabMain:AddSlider({
+    Name = "ความเร็ววิ่งกลับ (แนะนำ 350)",
+    Min = 100,
+    Max = 700,
+    Increase = 25,
+    Default = 351,
+    Callback = function(v)
+        Settings.ReturnSpeed = v
+    end
+})
+
+TabMain:AddToggle({
+    Name = "วิ่งลู่วิ่ง",
+    Default = false,
+    Callback = function(v)
+        Toggles.AutoTrain = v
+    end
+})
+
+TabMain:AddToggle({
+    Name = "วิ่งกด x2 เอง",
+    Default = true,
+    Callback = function(v)
+        Toggles.AutoClickPops = v
+    end
+})
+
+TabMain:AddSection("ระบบซื้อไข่")
+
+TabMain:AddDropdown({
+    Name = "เลือกไข่ (เลือกได้หลายฟอง)",
+    Options = EggOptions,
+    Default = {"Stone Egg ($100K)"},
+    MultiSelect = true,
+    Callback = function(val)
+        if type(val) == "table" then
+            SelectedEggs = val
+        elseif type(val) == "string" then
+            SelectedEggs = { [val] = true }
+        end
+    end
+})
+
+TabMain:AddToggle({
+    Name = "ซื้อไข่อัตโนมัติ",
+    Default = false,
+    Callback = function(v)
+        Toggles.AutoBuyEgg = v
+    end
+})
+
+TabMain:AddButton({
+    Name = "ซื้อไข่ที่เลือก (อย่างละ 1 ฟอง)",
+    Callback = function()
+        if Remotes:FindFirstChild("EggRemotes") and Remotes.EggRemotes:FindFirstChild("BuyEgg") then
+            for _, opt in ipairs(EggOptions) do
+                if SelectedEggs[opt] == true and EggsData[opt] then
+                    Remotes.EggRemotes.BuyEgg:FireServer(EggsData[opt])
+                    task.wait(0.08)
+                end
+            end
+        end
+    end
+})
+
+getgenv().StealToGrowHub_Loaded = true
+getgenv().StealToGrowHub_PerformSteal = performStealOnce
+getgenv().StealToGrowHub_PlantSeeds = plantStoredSeeds
+getgenv().StealToGrowHub_Toggles = Toggles
+getgenv().StealToGrowHub_Settings = Settings
+getgenv().StealToGrowHub_Cleanup = function()
+    pcall(function()
+        for _, g in ipairs(game:GetService("CoreGui"):GetChildren()) do
+            if g.Name == "[UPD] Steal to Grow a Garden" or g.Name == "redz Library V5" or g.Name == "StealToGrowHub" then
+                g:Destroy()
+            end
+        end
+        for _, g in ipairs(LocalPlayer.PlayerGui:GetChildren()) do
+            if g.Name == "[UPD] Steal to Grow a Garden" or g.Name == "redz Library V5" or g.Name == "StealToGrowHub" then
+                g:Destroy()
+            end
+        end
+    end)
+    pcall(function() antiAfkConn:Disconnect() end)
+    pcall(function() charAddedConn:Disconnect() end)
+    getgenv().StealToGrowHub_Loaded = false
+end
